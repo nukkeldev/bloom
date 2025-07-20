@@ -35,7 +35,7 @@ pub fn main() !void {
             _ = rpass;
             _ = delta_ns;
 
-            // zgui.showDemoWindow(null);
+            zgui.showDemoWindow(null);
             zgui.showMetricsWindow(null);
         }
 
