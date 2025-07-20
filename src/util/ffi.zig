@@ -30,19 +30,6 @@ pub const c = @cImport({
     }
 });
 
-// C-Interop
-
-pub fn CStr(allocator: std.mem.Allocator, str: []const u8) ![:0]const u8 {
-    const out = try allocator.alloc(u8, str.len + 1);
-    @memset(out, 0);
-    std.mem.copyForwards(u8, out, str);
-    return @ptrCast(out);
-}
-
-pub fn freeCStr(allocator: std.mem.Allocator, str: [:0]const u8) void {
-    allocator.free(str[0..str.len]);
-}
-
 // SDL
 
 /// Usage Notes:
@@ -135,12 +122,9 @@ pub const SDL = struct {
     /// completes.
     ///
     /// It is safe to call this function from any thread.
-    pub fn setGlobalStringProperty(allocator: std.mem.Allocator, name: [:0]const u8, value: []const u8) !void {
-        const cvalue = try CStr(allocator, value);
-        defer freeCStr(allocator, cvalue);
-
-        if (!c.SDL_SetStringProperty(c.SDL_GetGlobalProperties(), name, cvalue)) {
-            err("SetStringProperty", "{s} = {s}", .{ name, cvalue });
+    pub fn setGlobalStringProperty(name: [:0]const u8, value: []const u8) !void {
+        if (!c.SDL_SetStringProperty(c.SDL_GetGlobalProperties(), name, value[0.. :0])) {
+            err("SetStringProperty", "{s} = {s}", .{ name, value });
         }
     }
 
@@ -215,42 +199,20 @@ pub const SDL = struct {
         ///
         /// This function should only be called on the main thread.
         pub fn create(
-            allocator: std.mem.Allocator,
-            /// the title of the window, in UTF-8 encoding.
-            title: []const u8,
-            /// the (w, h) of the window.
-            size: [2]u32,
-            /// the (x, y)) of the window.
-            position: [2]u32,
+            /// properties to initialize the window with.
+            props: c.SDL_PropertiesID,
         ) !Window {
             var fz = FZ.init(@src(), "SDL.Window.create");
             defer fz.end();
 
             fz.push(@src(), "title -> ctitle");
-            const ctitle = try CStr(allocator, title);
-            defer freeCStr(allocator, ctitle);
 
             // Create the window.
             fz.replace(@src(), "SDL_CreateWindowWithProperties");
-            const props = c.SDL_CreateProperties();
-            if (props == 0) err("CreateProperties", "", .{});
-
-            _ = c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, ctitle);
-            _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
-            _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
-            _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-            _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, @intCast(size[0]));
-            _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, @intCast(size[1]));
-            _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_X_NUMBER, @intCast(position[0]));
-            _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_Y_NUMBER, @intCast(position[1]));
 
             var window = Window{
                 .handle = c.SDL_CreateWindowWithProperties(props) orelse {
-                    err("CreateWindowWithProperties", "title = {s}, size = {any}, position = {any}", .{
-                        title,
-                        size,
-                        position,
-                    });
+                    err("CreateWindowWithProperties", "", .{});
                     return error.SDLError;
                 },
             };
@@ -270,10 +232,9 @@ pub const SDL = struct {
                 const actual_size = try window.getSizeInPixels();
 
                 log.debug(
-                    "Window '{s}' created on display '{s}' ({}x{}({d}x)@{d}hz) " ++
+                    "Window created on display '{s}' ({}x{}({d}x)@{d}hz) " ++
                         "at ({}px, {}px) with a size of ({}px, {}px).",
                     .{
-                        title,
                         c.SDL_GetDisplayName(display.id),
                         display_mode.w,
                         display_mode.h,
@@ -586,7 +547,6 @@ pub const SDL = struct {
 
         /// Creates a `GPUDevice` and claims the supplied `Window`.
         pub fn createAndClaimForWindow(
-            allocator: std.mem.Allocator,
             /// a bitflag indicating which shader formats the app is able to provide.
             format_flags: c.SDL_GPUShaderFormat,
             // TODO: If `debug_mode` is enabled, `c.cImGui_ImplSDLGPU3_RenderDrawData` crashes
@@ -601,7 +561,7 @@ pub const SDL = struct {
             var fz = FZ.init(@src(), "SDL.GPUDevice.createAndClaimForWindow");
             defer fz.end();
 
-            const device = try create(allocator, format_flags, debug_mode, name_opt);
+            const device = try create(format_flags, debug_mode, name_opt);
             try device.claimWindow(window);
             return device;
         }
@@ -616,7 +576,6 @@ pub const SDL = struct {
         ///     "metal": Metal
         ///     `NULL`: let SDL pick the optimal driver
         pub fn create(
-            allocator: std.mem.Allocator,
             /// a bitflag indicating which shader formats the app is able to provide.
             format_flags: c.SDL_GPUShaderFormat,
             // TODO: If `debug_mode` is enabled, `c.cImGui_ImplSDLGPU3_RenderDrawData` crashes
@@ -637,12 +596,8 @@ pub const SDL = struct {
 
             // _ = c.SDL_SetHint(c.SDL_HINT_GPU_DRIVER, "vulkan");
 
-            const handle_opt = if (name_opt) |name| outer: {
-                const cname = try CStr(allocator, name);
-                defer freeCStr(allocator, cname);
-
-                break :outer c.SDL_CreateGPUDevice(format_flags, debug_mode, cname);
-            } else c.SDL_CreateGPUDevice(format_flags, debug_mode, null);
+            const handle_opt =
+                c.SDL_CreateGPUDevice(format_flags, debug_mode, if (name_opt) |name| name[0.. :0] else null);
 
             if (handle_opt) |handle| {
                 log.debug("GPU Device for driver '{s}' created!", .{name_opt orelse "optimal"});

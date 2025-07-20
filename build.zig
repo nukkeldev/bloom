@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
     const zgui_dep = b.dependency("zgui", .{
         .target = target,
         .optimize = dep_optimize,
+        .backend = .sdl3_gpu,
         .with_implot = true,
         .with_node_editor = true,
         .with_freetype = true,
@@ -84,6 +85,11 @@ pub fn build(b: *std.Build) void {
 
         mod.linkLibrary(tracy_lib);
     }
+
+    // -- Check -- //
+
+    const check_step = b.step("check", "Check build");
+    check_step.dependOn(&lib.step);
 
     // -- Tests -- //
 
