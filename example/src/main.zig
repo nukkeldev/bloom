@@ -1,46 +1,74 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
-
-pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "use other module" {
-    try std.testing.expectEqual(@as(i32, 150), lib.add(100, 50));
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
-}
-
 const std = @import("std");
 
-/// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
-const lib = @import("example_lib");
+const bloom = @import("bloom");
+
+const c = bloom.ffi.c;
+const SDL = bloom.ffi.SDL;
+const zgui = bloom.zgui;
+
+pub fn main() !void {
+    var da = std.heap.DebugAllocator(.{}).init;
+    defer _ = da.deinit();
+    const allocator = if (@import("builtin").mode == .Debug) da.allocator() else std.heap.smp_allocator;
+
+    const UserState = struct {
+        should_exit: bool = false,
+    };
+
+    const init = bloom.BloomInit(UserState){
+        .window_title = "Bloom Test",
+        .window_size = .{ 800, 600 },
+
+        .resizable = false,
+
+        .initial_user_state = .{},
+    };
+
+    var my_app = try bloom.initializeApp(UserState, allocator, init);
+    const MyApp = @TypeOf(my_app);
+
+    defer my_app.deinit() catch @panic("Failed to deinitialize app!");
+
+    const AppFuncs = struct {
+        pub fn render(app: *const MyApp, cmd: SDL.GPUCommandBuffer, rpass: SDL.GPURenderPass, delta_ns: u64) anyerror!void {
+            _ = app;
+
+            zgui.backend.newFrame(init.window_size[0], init.window_size[1], 1.0);
+
+            if (zgui.begin("Debug", .{})) {
+                defer zgui.end();
+
+                zgui.text("Test: `runApp`", .{});
+                zgui.text("Delta time: {}", .{std.fmt.fmtDuration(delta_ns)});
+            }
+
+            zgui.render();
+
+            zgui.backend.prepareDrawData(cmd.handle);
+            zgui.backend.renderDrawData(cmd.handle, rpass.handle, null);
+        }
+
+        pub fn update(app: *MyApp, delta_ns: u64) anyerror!void {
+            _ = delta_ns;
+
+            var event: c.SDL_Event = undefined;
+            while (c.SDL_PollEvent(&event)) {
+                if (event.type == c.SDL_EVENT_QUIT) {
+                    app.user_state.should_exit = true;
+                }
+            }
+        }
+
+        pub fn shouldExit(app: *const MyApp) anyerror!bool {
+            return app.user_state.should_exit;
+        }
+    };
+
+    try my_app.run(
+        AppFuncs.update,
+        std.time.ns_per_ms,
+        AppFuncs.render,
+        std.time.ns_per_s / 60,
+        AppFuncs.shouldExit,
+    );
+}

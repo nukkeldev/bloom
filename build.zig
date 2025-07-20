@@ -1,6 +1,78 @@
 const std = @import("std");
 
+var builder: *std.Build = undefined;
+
+pub fn link_sdl(
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    linkage: std.builtin.LinkMode,
+) void {
+    const sdl_dep = builder.dependency("sdl", .{
+        .target = target,
+        .optimize = optimize,
+        .preferred_linkage = linkage,
+        //.strip = null,
+        //.sanitize_c = null,
+        //.pic = null,
+        //.lto = null,
+        //.emscripten_pthreads = false,
+        //.install_build_config_h = false,
+    });
+    mod.linkLibrary(sdl_dep.artifact("SDL3"));
+}
+
+pub fn link_zgui(
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const zgui_dep = builder.dependency("zgui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .sdl3_gpu,
+        .with_implot = true,
+        .with_node_editor = true,
+        .with_freetype = true,
+    });
+    mod.addImport("zgui", zgui_dep.module("root"));
+    mod.linkLibrary(zgui_dep.artifact("imgui"));
+}
+
+pub fn link_tracy(
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const src = builder.dependency("tracy", .{}).path(".");
+    const tracy_mod = builder.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libcpp = true,
+    });
+
+    tracy_mod.addCMacro("TRACY_ENABLE", "");
+    tracy_mod.addIncludePath(src.path(builder, "public"));
+    tracy_mod.addCSourceFile(.{ .file = src.path(builder, "public/TracyClient.cpp") });
+
+    if (target.result.os.tag == .windows) {
+        tracy_mod.linkSystemLibrary("dbghelp", .{ .needed = true });
+        tracy_mod.linkSystemLibrary("ws2_32", .{ .needed = true });
+    }
+
+    const tracy_lib = builder.addLibrary(.{
+        .name = "tracy",
+        .root_module = tracy_mod,
+        .linkage = .static,
+    });
+    tracy_lib.installHeadersDirectory(src.path(builder, "public"), "", .{ .include_extensions = &.{".h"} });
+
+    mod.linkLibrary(tracy_lib);
+}
+
 pub fn build(b: *std.Build) void {
+    builder = b;
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -19,7 +91,7 @@ pub fn build(b: *std.Build) void {
 
     // -- Module and Library -- //
 
-    const mod = b.createModule(.{
+    const mod = b.addModule("bloom", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -35,56 +107,9 @@ pub fn build(b: *std.Build) void {
 
     // -- Dependencies -- //
 
-    const sdl_dep = b.dependency("sdl", .{
-        .target = target,
-        .optimize = dep_optimize,
-        .preferred_linkage = .static,
-        //.strip = null,
-        //.sanitize_c = null,
-        //.pic = null,
-        //.lto = null,
-        //.emscripten_pthreads = false,
-        //.install_build_config_h = false,
-    });
-    mod.linkLibrary(sdl_dep.artifact("SDL3"));
-
-    const zgui_dep = b.dependency("zgui", .{
-        .target = target,
-        .optimize = dep_optimize,
-        .backend = .sdl3_gpu,
-        .with_implot = true,
-        .with_node_editor = true,
-        .with_freetype = true,
-    });
-    mod.addImport("zgui", zgui_dep.module("root"));
-    mod.linkLibrary(zgui_dep.artifact("imgui"));
-
-    if (enable_tracy) {
-        const src = b.dependency("tracy", .{}).path(".");
-        const tracy_mod = b.createModule(.{
-            .target = target,
-            .optimize = dep_optimize,
-            .link_libcpp = true,
-        });
-
-        tracy_mod.addCMacro("TRACY_ENABLE", "");
-        tracy_mod.addIncludePath(src.path(b, "public"));
-        tracy_mod.addCSourceFile(.{ .file = src.path(b, "public/TracyClient.cpp") });
-
-        if (target.result.os.tag == .windows) {
-            tracy_mod.linkSystemLibrary("dbghelp", .{ .needed = true });
-            tracy_mod.linkSystemLibrary("ws2_32", .{ .needed = true });
-        }
-
-        const tracy_lib = b.addLibrary(.{
-            .name = "tracy",
-            .root_module = tracy_mod,
-            .linkage = .static,
-        });
-        tracy_lib.installHeadersDirectory(src.path(b, "public"), "", .{ .include_extensions = &.{".h"} });
-
-        mod.linkLibrary(tracy_lib);
-    }
+    link_sdl(mod, target, dep_optimize, .static);
+    link_zgui(mod, target, dep_optimize);
+    if (enable_tracy) link_tracy(mod, target, dep_optimize);
 
     // -- Check -- //
 
@@ -93,7 +118,7 @@ pub fn build(b: *std.Build) void {
 
     // -- Tests -- //
 
-    const tests = b.addTest(.{ .root_module = mod });
+    const tests = b.addTest(.{ .root_module = mod, .filters = b.args orelse &.{} });
     const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run tests");
