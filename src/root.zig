@@ -32,10 +32,12 @@ pub fn BloomInit(comptime UserState: type) type {
 
 pub fn BloomApp(comptime UserState: type) type {
     return struct {
-        arena: std.heap.ArenaAllocator,
+        allocator: std.mem.Allocator,
 
         window: SDL.Window,
         device: SDL.GPUDevice,
+
+        window_size: [2]u32,
 
         user_state: UserState,
 
@@ -60,7 +62,6 @@ pub fn BloomApp(comptime UserState: type) type {
             zgui.deinit();
 
             c.SDL_Quit();
-            self.arena.deinit();
         }
 
         // ---
@@ -71,7 +72,7 @@ pub fn BloomApp(comptime UserState: type) type {
 
         // ---
 
-        pub const UpdateFn = fn (app: *@This(), delta_ns: u64) anyerror!void;
+        pub const UpdateFn = fn (app: *@This(), sdl_events: []const c.SDL_Event, delta_ns: u64) anyerror!void;
         pub const RenderFn = fn (app: *const @This(), cmd: SDL.GPUCommandBuffer, rpass: SDL.GPURenderPass, delta_ns: u64) anyerror!void;
         pub const ShouldExitFn = fn (app: *const @This()) anyerror!bool;
 
@@ -95,8 +96,24 @@ pub fn BloomApp(comptime UserState: type) type {
             while (!try should_exit_fn(app)) {
                 app.time_ns = @intCast(std.time.nanoTimestamp());
 
-                if (app.time_ns >= app.next_update_ns) {
-                    try update_fn(app, app.time_ns - app.last_update_ns);
+                if (app.time_ns >= app.next_update_ns) update: {
+                    var sdl_event_buffer: [16]c.SDL_Event = undefined;
+                    var event_count: usize = 0;
+                    var event: c.SDL_Event = undefined;
+
+                    while (c.SDL_PollEvent(&event)) {
+                        _ = zgui.backend.processEvent(&event);
+                        if (event.type == c.SDL_EVENT_QUIT or (event.type == c.SDL_EVENT_KEY_DOWN and event.key.scancode == c.SDL_SCANCODE_ESCAPE)) {
+                            app.user_state.should_exit = true;
+                            break :update;
+                        }
+
+                        sdl_event_buffer[event_count] = event;
+                        event_count += 1;
+                    }
+
+                    try update_fn(app, sdl_event_buffer[0..event_count], app.time_ns - app.last_update_ns);
+
                     app.next_update_ns = app.time_ns + update_rate_ns;
                 }
 
@@ -117,7 +134,13 @@ pub fn BloomApp(comptime UserState: type) type {
 
                     const rpass = try SDL.GPURenderPass.begin(&cmd, &.{color_target_info}, null);
 
+                    zgui.backend.newFrame(app.window_size[0], app.window_size[1], 1.0);
+
                     try render_fn(app, cmd, rpass, app.time_ns - app.last_frame_ns);
+
+                    zgui.render();
+                    zgui.backend.prepareDrawData(cmd.handle);
+                    zgui.backend.renderDrawData(cmd.handle, rpass.handle, null);
 
                     rpass.end();
                     try cmd.submit();
@@ -132,7 +155,7 @@ pub fn BloomApp(comptime UserState: type) type {
 pub fn initializeApp(comptime UserState: type, allocator: std.mem.Allocator, init: BloomInit(UserState)) !BloomApp(UserState) {
     var app: BloomApp(UserState) = undefined;
 
-    app.arena = std.heap.ArenaAllocator.init(allocator);
+    app.allocator = allocator;
 
     app.user_state = init.initial_user_state;
     app.time_ns = @intCast(std.time.nanoTimestamp());
@@ -147,7 +170,10 @@ pub fn initializeApp(comptime UserState: type, allocator: std.mem.Allocator, ini
         return error.SDLError;
     }
 
-    _ = c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, try app.allocator.dupeZ(u8, init.window_title));
+    const ctitle = try app.allocator.dupeZ(u8, init.window_title);
+    defer app.allocator.free(ctitle);
+
+    _ = c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, ctitle);
     _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, init.hdpi);
     _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, init.resizable);
     _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, @intCast(init.window_size[0]));
@@ -158,9 +184,11 @@ pub fn initializeApp(comptime UserState: type, allocator: std.mem.Allocator, ini
     app.window = try SDL.Window.create(props);
     app.device = try SDL.GPUDevice.createAndClaimForWindow(init.shader_formats, false, null, &app.window);
 
+    app.window_size = try app.window.getSizeInPixels();
+
     // -- ImGui -- //
 
-    zgui.init(app.arena.allocator());
+    zgui.init(app.allocator);
     zgui.backend.init(app.window.handle, .{
         .device = app.device.handle,
         .color_target_format = c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM, // TODO: Might want to expose this to the user.
